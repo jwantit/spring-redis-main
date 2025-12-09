@@ -242,7 +242,7 @@ public class SearchService {
         });
     }
 
-//    @Cacheable(value = "search", key = "'popular_keywords'") //
+//    @Cacheable(value = "search", key = "'popular_keywords'") //interval로 popular 업데이트하는 로직함수. cacheable이 설정되어 있으면 해당 함수 안타기 때문에 redis가 업데이트 안됨
     public List<String> getPopularKeywords(int limit) {
         try {
             Set<String> keywords = stringRedisTemplate.opsForZSet().reverseRange(POPULAR_KEYWORDS_KEY, 0, limit - 1);
@@ -254,6 +254,7 @@ public class SearchService {
         }
     }
 
+    //검색 로직에 cache 삭제 기능이 있어서 업데이트 됨 
     @Cacheable(value = "search", key = "'recent_keywords'")
     public List<String> getRecentKeywords(int limit) {
         try {
