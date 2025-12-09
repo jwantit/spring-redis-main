@@ -143,6 +143,8 @@ public class SearchService {
         });
     }
 
+    //데이터 생성 버튼 클릭 시 빈 캐시 때문에 업데이트 안되는 현상 수정하기 위해 어노테이션 추가
+    @CacheEvict(cacheNames = "search", allEntries = true)
     public Map<String, List<String>> fastGenerateAndSnapshot(Map<String, Long> increments, List<String> recent, int limit) {
 
         //1. Redis 업데이트. ZSET 인기 검색어 점수 증가, LIST 최근 검색어 리스트 업데이트, 즉시 Redis 캐싱 반영
@@ -347,6 +349,8 @@ public class SearchService {
         private LocalDateTime lastUpdated;
     }
 
+    //캐시 초기화 버튼 클릭 시 빈 캐시 때문에 업데이트 안되는 현상 수정하기 위해 어노테이션 추가
+    @CacheEvict(cacheNames = "search", allEntries = true)
     public void clearAllCacheFast() {
         stringRedisTemplate.delete(POPULAR_KEYWORDS_KEY);
         stringRedisTemplate.delete(RECENT_KEYWORDS_KEY);
@@ -354,17 +358,18 @@ public class SearchService {
 
     public Map<String, Object> getRedisStatus() {
         ZSetOperations<String, String> zops = stringRedisTemplate.opsForZSet();
-        Set<ZSetOperations.TypedTuple<String>> popularWithScores = zops.reverseRangeWithScores(POPULAR_KEYWORDS_KEY, 0, -1); // 내림차순으로 가져옴. 범위 0~-1 : 전체 조회 
-        List<String> recentKeywords = stringRedisTemplate.opsForList().range(RECENT_KEYWORDS_KEY, 0, -1); //최근 검색어 최신 순으로 가져옴
-        Long popularCount = zops.zCard(POPULAR_KEYWORDS_KEY); //총 원소 개수 조회 
-        Long recentCount = stringRedisTemplate.opsForList().size(RECENT_KEYWORDS_KEY); //총 리스트 원소 개수 조회
+        Set<ZSetOperations.TypedTuple<String>> popularWithScores = zops.reverseRangeWithScores(POPULAR_KEYWORDS_KEY, 0, -1);
+        List<String> recentKeywords = stringRedisTemplate.opsForList().range(RECENT_KEYWORDS_KEY, 0, -1);
+
+        Long popularCount = Long.valueOf(popularWithScores.size()); 
+        Long recentCount = Long.valueOf(recentKeywords.size());
+
         return Map.of(
                 "popularKeywords", popularWithScores != null ? popularWithScores : Set.of(),
                 "recentKeywords", recentKeywords != null ? recentKeywords : List.of(),
                 "totalPopularCount", popularCount != null ? popularCount : 0L,
                 "totalRecentCount", recentCount != null ? recentCount : 0L
         );
-    }
 
     @Transactional // DB 복구 작업 전체에 트랜잭션 적용
     // 이 메서드를 활성화하려면 메인 애플리케이션에 @EnableScheduling 추가 해야함
