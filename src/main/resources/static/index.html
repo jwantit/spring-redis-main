@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>실시간 검색어 테스트</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 20px;
+      }
+      .container {
+        max-width: 800px;
+        margin: 0 auto;
+      }
+      .search-box {
+        margin: 20px 0;
+      }
+      input[type="text"] {
+        padding: 10px;
+        width: 300px;
+      }
+      button {
+        padding: 10px 20px;
+      }
+      .results {
+        margin: 20px 0;
+      }
+      .keyword-list {
+        background: #f5f5f5;
+        padding: 15px;
+        margin: 10px 0;
+        min-height: 48px;
+      }
+      .keyword-item {
+        padding: 5px;
+        border-bottom: 1px solid #ddd;
+      }
+      .message {
+        padding: 15px;
+        margin: 10px 0;
+        border-radius: 5px;
+        font-weight: bold;
+      }
+      .message.success {
+        background: #d4edda;
+        color: #155724;
+        border: 1px solid #c3e6cb;
+      }
+      .message.error {
+        background: #f8d7da;
+        color: #721c24;
+        border: 1px solid #f5c6cb;
+      }
+      .message.info {
+        background: #d1ecf1;
+        color: #0c5460;
+        border: 1px solid #bee5eb;
+      }
+      .loading {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>실시간 검색어 시스템</h1>
+
+      <div class="search-box">
+        <input type="text" id="searchInput" placeholder="검색어를 입력하세요" />
+        <button onclick="search(this)">검색</button>
+        <div class="test-buttons" style="margin: 20px 0">
+          <button
+            onclick="generateTestData(this)"
+            style="background: #007bff; color: #fff; margin-right: 10px"
+          >
+            테스트 데이터 생성
+          </button>
+          <button
+            onclick="clearCache(this)"
+            style="background: #dc3545; color: #fff; margin-right: 10px"
+          >
+            캐시 초기화
+          </button>
+          <button
+            onclick="checkRedisStatus(this)"
+            style="background: #28a745; color: #fff; margin-right: 10px"
+          >
+            Redis 상태 확인
+          </button>
+          <button
+            onclick="compareRedisVsDB(this)"
+            style="background: #ffc107; color: #000"
+          >
+            Redis vs DB 비교
+          </button>
+        </div>
+      </div>
+
+      <div class="results">
+        <h3>실시간 인기 검색어</h3>
+        <div id="popularKeywords" class="keyword-list"></div>
+
+        <h3>최근 검색어</h3>
+        <div id="recentKeywords" class="keyword-list"></div>
+
+        <h3>Redis vs DB 성능 비교</h3>
+        <div
+          id="performanceComparison"
+          class="keyword-list"
+          style="background: #e8f4fd"
+        >
+          <div class="keyword-item">
+            성능 비교를 위해 "Redis vs DB 비교" 버튼을 클릭하세요
+          </div>
+        </div>
+      </div>
+
+      <div id="messageArea" style="margin: 20px 0; display: none"></div>
+    </div>
+    <script src="/js/script.js"></script>
+
+  </body>
+</html>
