@@ -361,7 +361,7 @@ public class SearchService {
         Set<ZSetOperations.TypedTuple<String>> popularWithScores = zops.reverseRangeWithScores(POPULAR_KEYWORDS_KEY, 0, -1);
         List<String> recentKeywords = stringRedisTemplate.opsForList().range(RECENT_KEYWORDS_KEY, 0, -1);
 
-        Long popularCount = Long.valueOf(popularWithScores.size()); 
+        Long popularCount = Long.valueOf(popularWithScores.size());
         Long recentCount = Long.valueOf(recentKeywords.size());
 
         return Map.of(
@@ -370,6 +370,7 @@ public class SearchService {
                 "totalPopularCount", popularCount != null ? popularCount : 0L,
                 "totalRecentCount", recentCount != null ? recentCount : 0L
         );
+    }
 
     @Transactional // DB 복구 작업 전체에 트랜잭션 적용
     // 이 메서드를 활성화하려면 메인 애플리케이션에 @EnableScheduling 추가 해야함
