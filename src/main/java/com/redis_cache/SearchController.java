@@ -133,4 +133,23 @@ public class SearchController {
                 )
         ));
     }
+
+    // 더미데이터 생성용(캐시에만 생성됨)
+    @GetMapping("/debug/fill-dummy")
+    public ResponseEntity<Map<String, Object>> fillDummyData(
+            @RequestParam(name = "popular", defaultValue = "1000") int popularCount,
+            @RequestParam(name = "recent", defaultValue = "10") int recentCount
+    ) {
+        searchService.generateDummyRedisData(popularCount, recentCount);
+
+        Map<String, Object> status = searchService.getRedisStatus();
+
+        return ResponseEntity.ok(Map.of(
+                "message", "더미 데이터 생성 완료",
+                "popularRequested", popularCount,
+                "recentRequested", recentCount,
+                "totalPopularCount", status.get("totalPopularCount"),
+                "totalRecentCount", status.get("totalRecentCount")
+        ));
+    }
 }

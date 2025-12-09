@@ -29,6 +29,8 @@ public class SearchService {
     private static final String POPULAR_KEYWORDS_KEY = "popular_keywords";
     private static final String RECENT_KEYWORDS_KEY = "recent_keywords";
     private static final String FAILED_INCREMENTS_DLQ = "failed_increments_dlq";
+    private static final long POPULAR_MAX_SIZE = 1_000L;     // 유지하고 싶은 최대 개수
+    private static final double POPULAR_MIN_SCORE_THRESHOLD = 2.0; // score 0~2는 쓰레기값으로
 
     //개선된 processSearch: Redis 우선 처리 (ZSET/LIST) 후, DB는 비동기 처리
     @CacheEvict(cacheNames = "search", allEntries = true)
@@ -430,6 +432,74 @@ public class SearchService {
         }
 
         return increments;
+    }
+    // 10분마다 인기검색어 ZSET 용량/쓰레기값 정리
+    @Scheduled(fixedDelay = 1 * 60 * 1000L) // 이전 실행 끝난 시점 기준 10분 후 다시 실행
+    public void cleanupPopularKeywords() {
+
+        ZSetOperations<String, String> zops = stringRedisTemplate.opsForZSet();
+
+        // 1) 현재 전체 개수 조회
+        Long size = zops.zCard(POPULAR_KEYWORDS_KEY);
+        if (size == null) {
+            return;
+        }
+
+        // 아직 트리거 기준 이하(<= 1000)이면 그냥 둔다
+        if (size <= POPULAR_MAX_SIZE) {
+            log.debug("popular_keywords cleanup skip: size={} (trigger={})", size, POPULAR_MAX_SIZE);
+            return;
+        }
+
+        log.info("popular_keywords cleanup start: size={}", size);
+
+        // 2) 먼저 점수 낮은 애들부터 제거 (score 0 ~ POPULAR_MIN_SCORE_THRESHOLD)
+        Long removedByScore = zops.removeRangeByScore(POPULAR_KEYWORDS_KEY, 0, POPULAR_MIN_SCORE_THRESHOLD);
+        log.info("popular_keywords removed by score threshold: {}", removedByScore);
+
+        // 3) 다시 크기 확인
+        size = zops.zCard(POPULAR_KEYWORDS_KEY);
+        if (size == null || size <= POPULAR_MAX_SIZE) {
+            log.info("popular_keywords cleanup done after score trim: size={}", size);
+            return;
+        }
+
+        // 4) 그래도 너무 많으면, 하위 랭크부터 잘라내서 maxSize로 맞춘다
+        long removeCount = size - POPULAR_MAX_SIZE;
+        if (removeCount > 0) {
+            // rank 0이 score 가장 낮은 애 → 0 ~ removeCount-1 구간 삭제
+            zops.removeRange(POPULAR_KEYWORDS_KEY, 0, removeCount - 1);
+            log.info("popular_keywords removed by rank: removeCount={}, newSize={}",
+                    removeCount, zops.zCard(POPULAR_KEYWORDS_KEY));
+        }
+    }
+
+    // 더미데이터 생성용
+    public void generateDummyRedisData(int popularCount, int recentCount) {
+
+        // 1) 인기 검색어 더미 (ZSET: popular_keywords)
+        stringRedisTemplate.executePipelined((RedisConnection conn) -> {
+            var ser = stringRedisTemplate.getStringSerializer();
+            byte[] zkey = ser.serialize(POPULAR_KEYWORDS_KEY);
+
+            for (int i = 1; i <= popularCount; i++) {
+                String keyword = "dummy_keyword_" + i;
+                // 점수는 1 ~ 1000 사이 랜덤
+                double score = 1 + (Math.random() * 1000);
+                conn.zIncrBy(zkey, score, ser.serialize(keyword));
+            }
+            return null;
+        });
+
+        // 2) 최근 검색어 더미 (LIST: recent_keywords)
+        stringRedisTemplate.delete(RECENT_KEYWORDS_KEY); // 기존 것 리셋
+
+        for (int i = 1; i <= recentCount; i++) {
+            String keyword = "dummy_recent_" + i;
+            stringRedisTemplate.opsForList().leftPush(RECENT_KEYWORDS_KEY, keyword);
+        }
+        // 최대 10개만 유지 (너 기존 정책 유지)
+        stringRedisTemplate.opsForList().trim(RECENT_KEYWORDS_KEY, 0, 9);
     }
 
     private void safePurgeCorrupted() {
