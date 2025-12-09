@@ -8,6 +8,7 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -27,12 +28,66 @@ public class SearchService {
 
     private static final String POPULAR_KEYWORDS_KEY = "popular_keywords";
     private static final String RECENT_KEYWORDS_KEY = "recent_keywords";
+    private static final String FAILED_INCREMENTS_DLQ = "failed_increments_dlq";
 
+    //개선된 processSearch: Redis 우선 처리 (ZSET/LIST) 후, DB는 비동기 처리
     @CacheEvict(cacheNames = "search", allEntries = true)
     public void processSearch(String keyword) {
-        saveOrUpdateSearchKeyword(keyword); //DB 저장
-        updateRealTimeRanking(keyword); //Redis ZSET(Sorted Set) 업데이트
-        updateRecentKeywords(keyword); //Redis List 업데이트
+
+        // 1. Redis 인기 검색어 업데이트 (ZSET) - Atomic
+        updateRealTimeRanking(keyword);
+
+        // 2. Redis 최근 검색어 업데이트 (LIST with MULTI/EXEC) - Strict Atomic
+        updateRecentKeywords(keyword);
+
+        // 3. DB 업데이트를 비동기
+        // DB 정합성을 확보하며, 실패 시 DLQ에 저장.
+        CompletableFuture.runAsync(() -> saveOrUpdateSearchKeywordAsync(keyword))
+                .exceptionally(ex -> {
+                    log.error("ERROR: Asynchronous DB upsert failed for keyword: {}", keyword, ex);
+
+                    // 비동기 실패 시 DLQ에 저장
+                    saveFailedIncrementForRetry(keyword, 1L, ex);
+
+                    return null;
+                });
+    }
+
+    // 기존 saveOrUpdateSearchKeyword를 비동기 실행에 맞게 트랜잭션 분리
+    // 이 메서드는 CompletableFuture 내부에서 실행되므로 @Transactional이 안전하게 작동합니다.
+    @Transactional
+    public void saveOrUpdateSearchKeywordAsync(String keyword) {
+        SearchKeyword searchKeyword = searchKeywordRepository
+                .findByKeyword(keyword)
+                .orElse(SearchKeyword.builder()
+                        .keyword(keyword)
+                        .searchCount(0L)
+                        .lastSearchedAt(LocalDateTime.now()) // 처음 저장 시 시간 기록
+                        .build());
+
+        searchKeyword.incrementSearchCount();
+        searchKeyword.setLastSearchedAt(LocalDateTime.now());
+        if (searchKeyword.getFirstSearchedAt() == null) {
+            searchKeyword.setFirstSearchedAt(LocalDateTime.now());
+        }
+
+        searchKeywordRepository.save(searchKeyword);
+    }
+
+    // 새로 추가: 단일 실패 키워드를 DLQ에 저장
+    private void saveFailedIncrementForRetry(String keyword, Long increment, Throwable ex) {
+        try {
+            // 단일 키워드는 간단히 "키워드:1" 형태로 저장
+            String serializedData = keyword + ":" + increment;
+
+            stringRedisTemplate.opsForList().rightPush(FAILED_INCREMENTS_DLQ, serializedData);
+
+            log.warn("DB 업데이트 실패 데이터가 DLQ({})에 저장됨. Data: {}, Error: {}",
+                    FAILED_INCREMENTS_DLQ, serializedData, ex.getMessage());
+
+        } catch (Exception e) {
+            log.error("CRITICAL ERROR: Failed to save increment to DLQ.", e);
+        }
     }
 
     @Transactional
@@ -71,7 +126,7 @@ public class SearchService {
             var ser = stringRedisTemplate.getStringSerializer();
             byte[] zkey = ser.serialize(POPULAR_KEYWORDS_KEY);
             byte[] lkey = ser.serialize(RECENT_KEYWORDS_KEY);
-ㅇㅇㅇ
+
             for (Map.Entry<String, Long> e : increments.entrySet()) {
                 conn.zIncrBy(zkey, e.getValue(), ser.serialize(e.getKey()));
             }
@@ -87,8 +142,14 @@ public class SearchService {
     }
 
     public Map<String, List<String>> fastGenerateAndSnapshot(Map<String, Long> increments, List<String> recent, int limit) {
-        updateRedisBulkOnly(increments, recent); //Redis 업데이트. ZSET 인기 검색어 점수 증가, LIST 최근 검색어 리스트 업데이트, 즉시 Redis 캐싱 반영
-        CompletableFuture.runAsync(() -> upsertDbBulk(increments)); //비동기로 DB 저장
+
+        //1. Redis 업데이트. ZSET 인기 검색어 점수 증가, LIST 최근 검색어 리스트 업데이트, 즉시 Redis 캐싱 반영
+        updateRedisBulkOnly(increments, recent);
+
+        //2. 비동기로 DB 저장
+        CompletableFuture.runAsync(() -> upsertDbBulk(increments));
+
+        //3. Redis 스냅샷 (조회)
         Map<String, List<String>> snap = new HashMap<>();
         snap.put("popular", getPopularKeywordsRaw(limit));
         snap.put("recent", getRecentKeywordsRaw(limit));
@@ -146,17 +207,6 @@ public class SearchService {
         });
     }
 
-    private void saveOrUpdateSearchKeyword(String keyword) {
-        SearchKeyword searchKeyword = searchKeywordRepository
-                .findByKeyword(keyword)
-                .orElse(SearchKeyword.builder()
-                        .keyword(keyword)
-                        .searchCount(0L)
-                        .build());
-        searchKeyword.incrementSearchCount();
-        searchKeywordRepository.save(searchKeyword);
-    }
-
     //Redis 인기 검색어 업데이트
     // ZINCRBY popular_keywords 1 "자바"
     // 예시 데이터(ZSET) : - ("자바", score =5) - ("스프링", score=3)
@@ -167,12 +217,28 @@ public class SearchService {
     //Redis 최근 검색어 업데이트
     //예시 데이터(LIST) : ["자바", "스프링", "Redis", ...]
     private void updateRecentKeywords(String keyword) {
-        stringRedisTemplate.opsForList().remove(RECENT_KEYWORDS_KEY, 0, keyword); //LREM 중복 제거
-        stringRedisTemplate.opsForList().leftPush(RECENT_KEYWORDS_KEY, keyword); //LPUSH 가장 앞에 추가 
-        stringRedisTemplate.opsForList().trim(RECENT_KEYWORDS_KEY, 0, 9); // LTrim 최근 10개만 유지
+
+        stringRedisTemplate.execute((RedisConnection connection) -> {
+            connection.multi(); // 트랜잭션 시작
+
+            byte[] keyBytes = stringRedisTemplate.getStringSerializer().serialize(RECENT_KEYWORDS_KEY);
+            byte[] valueBytes = stringRedisTemplate.getStringSerializer().serialize(keyword);
+
+            // 1. 중복 제거 (LREM)
+            connection.lRem(keyBytes, 0, valueBytes);
+
+            // 2. 가장 앞에 추가 (LPUSH)
+            connection.lPush(keyBytes, valueBytes);
+
+            // 3. 최근 10개만 유지 (LTRIM)
+            // LTRIM key 0 9
+            connection.lTrim(keyBytes, 0, 9);
+
+            return connection.exec(); // 트랜잭션 실행 및 결과 반환
+        });
     }
 
-    @Cacheable(value = "search", key = "'popular_keywords'")
+//    @Cacheable(value = "search", key = "'popular_keywords'") //
     public List<String> getPopularKeywords(int limit) {
         try {
             Set<String> keywords = stringRedisTemplate.opsForZSet().reverseRange(POPULAR_KEYWORDS_KEY, 0, limit - 1);
@@ -296,6 +362,74 @@ public class SearchService {
                 "totalPopularCount", popularCount != null ? popularCount : 0L,
                 "totalRecentCount", recentCount != null ? recentCount : 0L
         );
+    }
+
+    @Transactional // DB 복구 작업 전체에 트랜잭션 적용
+    // 이 메서드를 활성화하려면 메인 애플리케이션에 @EnableScheduling 추가 해야함
+    @Scheduled(fixedDelay = 300000) // 5분마다 실행
+    public void retryFailedDbUpdates() {
+        log.info("DLQ 복구 배치 시작.");
+        long startTime = System.currentTimeMillis();
+        int successCount = 0;
+        int failedCount = 0;
+
+        // 시스템 과부하를 막기 위해 최대 처리 건수를 제한. (100건)
+        final int MAX_ATTEMPTS = 100;
+
+        for (int i = 0; i < MAX_ATTEMPTS; i++) {
+            // 1. DLQ에서 데이터 안전하게 꺼내기 (LPOP)
+            // LPOP을 사용하여 큐의 앞에서부터 데이터를 꺼냄과 동시에 제거.
+            String serializedData = stringRedisTemplate.opsForList().leftPop(FAILED_INCREMENTS_DLQ);
+
+            // 큐가 비어있으면 종료
+            if (serializedData == null) {
+                break;
+            }
+
+            try {
+                // 2. 데이터 역직렬화 (복원)
+                Map<String, Long> increments = deserializeIncrements(serializedData);
+
+                // 3. DB 업데이트 재시도 (기존의 upsertDbBulk를 호출하여 벌크 처리)
+                upsertDbBulk(increments);
+                successCount++;
+                log.info("DLQ 복구 성공: {}", increments);
+
+            } catch (Exception e) {
+                // 4. 재시도 실패 처리: 치명적 오류로 간주하고 로그만 남김 (무한 재시도 방지)
+                log.error("DLQ 복구 실패 (데이터 손실 가능성): {}", serializedData, e);
+                failedCount++;
+                // 실패 데이터는 DLQ에서 제거되었으므로, 복구에 계속 실패한다면 별도의 수동 처리가 필요합니다.
+            }
+        }
+
+        long duration = System.currentTimeMillis() - startTime;
+        log.info("DLQ 복구 배치 완료. 성공: {}건, 실패: {}건. 소요 시간: {}ms", successCount, failedCount, duration);
+    }
+
+     //DLQ에 저장된 String 데이터를 Map<String, Long>으로 역직렬화.
+     //DLQ에 저장된 키워드 포맷: "keyword:1" 을 Map으로 복원
+    private Map<String, Long> deserializeIncrements(String serializedData) {
+        if (serializedData == null || serializedData.isEmpty()) {
+            return Collections.emptyMap();
+        }
+
+        // 단일 키워드 포맷인 "keyword:1"을 처리
+        Map<String, Long> increments = new HashMap<>();
+        String[] pair = serializedData.split(":");
+
+        if (pair.length == 2) {
+            try {
+                // DLQ에 저장된 단일 키워드를 벌크 처리에 맞게 Map<String, Long> 형태로 복원
+                increments.put(pair[0].trim(), Long.valueOf(pair[1].trim()));
+            } catch (NumberFormatException e) {
+                log.error("역직렬화 오류: 유효하지 않은 숫자 형식: {}", pair, e);
+            }
+        } else {
+            log.error("역직렬화 오류: 예상치 못한 DLQ 데이터 형식: {}", serializedData);
+        }
+
+        return increments;
     }
 
     private void safePurgeCorrupted() {
