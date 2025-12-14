@@ -25,6 +25,7 @@ public class SearchService {
 
     private final SearchKeywordRepository searchKeywordRepository;
     private final StringRedisTemplate stringRedisTemplate;
+    private final SseManager sseManager; // 추가
 
     private static final String POPULAR_KEYWORDS_KEY = "popular_keywords";
     private static final String RECENT_KEYWORDS_KEY = "recent_keywords";
@@ -53,6 +54,8 @@ public class SearchService {
 
                     return null;
                 });
+        // 4. 인기 검색어 TOP10 변경 시 SSE 브로드캐스트
+        notifyPopularChangeIfNeeded();
     }
 
     // 기존 saveOrUpdateSearchKeyword를 비동기 실행에 맞게 트랜잭션 분리
@@ -141,6 +144,9 @@ public class SearchService {
             }
             return null;
         });
+
+        // 인기 검색어 TOP10 변경 여부 확인 후 SSE 브로드캐스트(예비)
+        notifyPopularChangeIfNeeded();
     }
 
     //데이터 생성 버튼 클릭 시 빈 캐시 때문에 업데이트 안되는 현상 수정하기 위해 어노테이션 추가
@@ -149,6 +155,9 @@ public class SearchService {
 
         //1. Redis 업데이트. ZSET 인기 검색어 점수 증가, LIST 최근 검색어 리스트 업데이트, 즉시 Redis 캐싱 반영
         updateRedisBulkOnly(increments, recent);
+
+        // 1-1. 인기 검색어 TOP10 변경 시 SSE 브로드캐스트
+        notifyPopularChangeIfNeeded();
 
         //2. 비동기로 DB 저장
         CompletableFuture.runAsync(() -> upsertDbBulk(increments));
@@ -496,6 +505,7 @@ public class SearchService {
                 conn.zIncrBy(zkey, score, ser.serialize(keyword));
             }
             return null;
+
         });
 
         // 2) 최근 검색어 더미 (LIST: recent_keywords)
@@ -514,6 +524,17 @@ public class SearchService {
             stringRedisTemplate.delete(POPULAR_KEYWORDS_KEY);
             stringRedisTemplate.delete(RECENT_KEYWORDS_KEY);
         } catch (DataAccessException ignored) {
+        }
+    }
+
+    //Redis ZSET 기반 인기 검색어 TOP10을 가져와,이전 스냅샷과 비교 후 변경된 경우에만 SSE 전송
+    private void notifyPopularChangeIfNeeded() {
+        try {
+            List<String> latestTop10 = getPopularKeywordsRaw(10); // 이미 있는 메서드 활용
+            log.debug("[SSE] 인기 검색어 변경 여부 체크. latestTop10={}", latestTop10);
+            sseManager.broadcastIfChanged(latestTop10);
+        } catch (Exception ex) {
+            log.warn("[SSE] 인기 검색어 변경 알림 중 예외 발생 (하지만 검색 로직은 계속 진행).", ex);
         }
     }
 }

@@ -303,12 +303,64 @@ window.showRedisKeys = showRedisKeys;
 
 (async function init() {
   await loadKeywords();
-  setInterval(updatePopularKeywords, 3000);
+  initPopularSse();         // 이후부터는 인기 검색어는 SSE로만 갱신
+//  setInterval(updatePopularKeywords, 3000);
 
   // 초기 로딩 시 Redis 정보 안내
   console.log("실시간 검색어 시스템 시작!");
   console.log("F12 Console에서 showRedisKeys() 함수로 Redis 상세 정보 확인 가능");
 })();
+
+let popularEventSource = null;
+
+function initPopularSse() {
+  if (popularEventSource) {
+    popularEventSource.close();
+  }
+
+  console.log("SSE: /api/stream/popular-keywords 연결 시도...");
+
+  popularEventSource = new EventSource("/api/stream/popular-keywords");
+
+  // 서버에서 popular-init 이벤트(초기 데이터) 받기
+  popularEventSource.addEventListener("popular-init", (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      console.group("🔥 SSE 초기 인기 검색어 수신");
+      console.log("초기 인기 검색어:", data);
+      console.groupEnd();
+
+      displayKeywords("popularKeywords", Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error("SSE popular-init 파싱 에러:", e, event.data);
+    }
+  });
+
+  // 랭킹이 실제로 변경되었을 때 popular-update 이벤트 받기
+  popularEventSource.addEventListener("popular-update", (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      console.group("⚡ SSE 인기 검색어 변경 감지");
+      console.log("변경된 인기 검색어 TOP10:", data);
+      console.groupEnd();
+
+      displayKeywords("popularKeywords", Array.isArray(data) ? data : []);
+    } catch (e) {
+      console.error("SSE popular-update 파싱 에러:", e, event.data);
+    }
+  });
+
+  popularEventSource.onopen = () => {
+    console.log("SSE 연결 성공: 인기 검색어 실시간 구독 시작");
+  };
+
+  popularEventSource.onerror = (event) => {
+    console.error("SSE 연결 오류. 5초 후 재연결 시도", event);
+    popularEventSource.close();
+    setTimeout(initPopularSse, 5000); // 재연결 시도
+  };
+}
+
 
 Object.assign(window, {
   search,
